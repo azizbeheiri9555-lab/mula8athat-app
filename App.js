@@ -1,4 +1,4 @@
-// App.js - تطبيق ملاحظات مع نسخ احتياطي خارجي وزر استعادة في الشاشة الرئيسية
+// App.js - تطبيق ملاحظات مع نسخ احتياطي في مجلد عام (يظل بعد إلغاء التثبيت)
 import React, { useState, useEffect } from 'react';
 import {
   StyleSheet, Text, View, TextInput, TouchableOpacity, FlatList,
@@ -7,6 +7,8 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import * as DocumentPicker from 'expo-document-picker';
 
 const COLORS = [
   { id: 'white', name: 'أبيض', bg: '#ffffff', text: '#333333', icon: '⚪' },
@@ -62,14 +64,14 @@ export default function App() {
   
   const [isBackingUp, setIsBackingUp] = useState(false);
 
-  // ==================== مسار النسخة الاحتياطية الخارجية ====================
-  const getBackupPath = () => {
-    return FileSystem.documentDirectory + 'notes_backup.json';
+  // ==================== مسار النسخة الاحتياطية المؤقتة ====================
+  const getTempBackupPath = () => {
+    return FileSystem.documentDirectory + 'notes_backup_temp.json';
   };
 
-  // ==================== دوال النسخ الاحتياطي الخارجي ====================
+  // ==================== دوال النسخ الاحتياطي في مجلد عام ====================
 
-  // حفظ نسخة احتياطية في الذاكرة الخارجية
+  // حفظ نسخة احتياطية ومشاركتها لحفظها في مجلد عام (مثل Downloads)
   const saveBackupToDevice = async () => {
     setIsBackingUp(true);
     try {
@@ -80,52 +82,67 @@ export default function App() {
         version: '2.0'
       };
       
-      const backupPath = getBackupPath();
-      await FileSystem.writeAsStringAsync(backupPath, JSON.stringify(backup));
+      const tempPath = getTempBackupPath();
+      await FileSystem.writeAsStringAsync(tempPath, JSON.stringify(backup, null, 2));
       
-      // أيضاً نحفظ في AsyncStorage كنسخة احتياطية داخلية
-      await AsyncStorage.setItem('@smart_backup', JSON.stringify(backup));
-      
-      Alert.alert('✅ نجاح', 'تم حفظ النسخة الاحتياطية على جهازك');
+      // فتح خيار المشاركة لحفظ الملف في مجلد عام
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(tempPath, {
+          dialogTitle: 'حفظ النسخة الاحتياطية',
+          mimeType: 'application/json',
+        });
+        Alert.alert('✅ نجاح', 'تم إنشاء النسخة الاحتياطية. قم بحفظها في مجلد التحميلات (Downloads)');
+      } else {
+        Alert.alert('✅ نجاح', 'تم حفظ النسخة الاحتياطية مؤقتاً');
+      }
     } catch (error) {
       Alert.alert('خطأ', 'فشل حفظ النسخة الاحتياطية: ' + error.message);
     }
     setIsBackingUp(false);
   };
 
-  // البحث عن نسخة احتياطية عند أول تشغيل
-  const checkForExternalBackup = async () => {
+  // استعادة النسخة الاحتياطية من ملف تم اختياره يدوياً
+  const restoreFromExternalManually = async () => {
     try {
-      const backupPath = getBackupPath();
-      const backupExists = await FileSystem.getInfoAsync(backupPath);
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/json',
+        copyToCacheDirectory: true
+      });
       
-      if (backupExists.exists) {
-        const backupContent = await FileSystem.readAsStringAsync(backupPath);
-        const backup = JSON.parse(backupContent);
+      if (result.assets && result.assets[0]) {
+        const fileUri = result.assets[0].uri;
+        const fileContent = await FileSystem.readAsStringAsync(fileUri);
+        const backup = JSON.parse(fileContent);
         
         Alert.alert(
-          '📦 تم العثور على نسخة احتياطية',
-          `تاريخ النسخة: ${new Date(backup.date).toLocaleString('ar-SA')}\nهل تريد استعادتها؟`,
+          'استعادة النسخة الاحتياطية',
+          `تاريخ النسخة: ${new Date(backup.date).toLocaleString('ar-SA')}\nسيتم استبدال الملاحظات الحالية. هل أنت متأكد؟`,
           [
-            { text: 'لا، بدء جديد', onPress: () => createDefaultData() },
-            { text: 'نعم، استعادة', onPress: () => restoreFromExternalBackup(backup) }
+            { text: 'إلغاء', style: 'cancel' },
+            { text: 'استعادة', onPress: () => restoreFromExternalBackup(backup) }
           ]
         );
-        return true;
       }
-      return false;
     } catch (error) {
-      console.log('خطأ في البحث عن النسخة الاحتياطية:', error);
-      return false;
+      Alert.alert('خطأ', 'فشل قراءة الملف أو الملف غير صالح');
     }
   };
 
-  // استعادة النسخة الاحتياطية من الملف الخارجي
+  // تنفيذ استعادة البيانات
   const restoreFromExternalBackup = async (backup) => {
     try {
       if (backup.folders) {
         setFolders(backup.folders);
         await AsyncStorage.setItem('@smart_folders_v15', JSON.stringify(backup.folders));
+        
+        // تحديث المجلد المفتوح إذا كان موجوداً
+        if (selectedFolder && backup.folders) {
+          const updatedFolder = backup.folders.find(f => f.id === selectedFolder.id);
+          if (updatedFolder) {
+            setSelectedFolder(updatedFolder);
+            setNotes(updatedFolder.notes);
+          }
+        }
       }
       if (backup.trash) {
         setTrash(backup.trash);
@@ -138,30 +155,17 @@ export default function App() {
     }
   };
 
-  // استعادة يدوية من ملف خارجي
-  const restoreFromExternalManually = async () => {
-    try {
-      const backupPath = getBackupPath();
-      const backupExists = await FileSystem.getInfoAsync(backupPath);
-      
-      if (backupExists.exists) {
-        const backupContent = await FileSystem.readAsStringAsync(backupPath);
-        const backup = JSON.parse(backupContent);
-        
-        Alert.alert(
-          'استعادة النسخة الاحتياطية',
-          `تاريخ النسخة: ${new Date(backup.date).toLocaleString('ar-SA')}\nسيتم استبدال الملاحظات الحالية. هل أنت متأكد؟`,
-          [
-            { text: 'إلغاء', style: 'cancel' },
-            { text: 'استعادة', onPress: () => restoreFromExternalBackup(backup) }
-          ]
-        );
-      } else {
-        Alert.alert('تنبيه', 'لا توجد نسخة احتياطية على الجهاز');
-      }
-    } catch (error) {
-      Alert.alert('خطأ', 'فشل قراءة النسخة الاحتياطية');
-    }
+  // البحث عن نسخة احتياطية عند أول تشغيل
+  const checkForExternalBackup = async () => {
+    Alert.alert(
+      '📦 نسخة احتياطية',
+      'هل لديك نسخة احتياطية محفوظة مسبقاً؟',
+      [
+        { text: 'لا، بدء جديد', onPress: () => createDefaultData() },
+        { text: 'نعم، استعادة', onPress: () => restoreFromExternalManually() }
+      ]
+    );
+    return true;
   };
 
   // إنشاء البيانات الافتراضية
@@ -228,12 +232,8 @@ export default function App() {
       if (savedFolders) {
         setFolders(JSON.parse(savedFolders));
       } else {
-        // أول تشغيل - نبحث عن نسخة احتياطية خارجية أولاً
-        const hasExternalBackup = await checkForExternalBackup();
-        if (!hasExternalBackup) {
-          // لا توجد نسخة احتياطية - ننشئ بيانات افتراضية
-          await createDefaultData();
-        }
+        // أول تشغيل - نبحث عن نسخة احتياطية
+        await checkForExternalBackup();
       }
       const savedTrash = await AsyncStorage.getItem('@smart_trash_v13');
       if (savedTrash) setTrash(JSON.parse(savedTrash));
