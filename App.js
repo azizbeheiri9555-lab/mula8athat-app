@@ -1,4 +1,4 @@
-// App.js - تطبيق ملاحظات مع نسخ احتياطي في مجلد عام (يظل بعد إلغاء التثبيت)
+// App.js - تطبيق ملاحظات متكامل مع تذكيرات وإشعارات
 import React, { useState, useEffect } from 'react';
 import {
   StyleSheet, Text, View, TextInput, TouchableOpacity, FlatList,
@@ -9,6 +9,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as DocumentPicker from 'expo-document-picker';
+import * as Notifications from 'expo-notifications';
+import DateTimePicker from '@react-native-community/datetimepicker';
+
+// إعدادات الإشعارات
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 const COLORS = [
   { id: 'white', name: 'أبيض', bg: '#ffffff', text: '#333333', icon: '⚪' },
@@ -47,7 +58,7 @@ export default function App() {
   const [currentNote, setCurrentNote] = useState({
     id: null, title: '', content: '', color: COLORS[0], tags: [],
     checklist: [], links: [], isLocked: false, lockPassword: '',
-    isPinned: false, isFavorite: false
+    isPinned: false, isFavorite: false, reminder: null
   });
   
   const [checklistItem, setChecklistItem] = useState('');
@@ -62,7 +73,119 @@ export default function App() {
   const [unlockPasswordInput, setUnlockPasswordInput] = useState('');
   const [pendingUnlockNote, setPendingUnlockNote] = useState(null);
   
+  // متغيرات التذكيرات
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
+  const [selectedReminderDate, setSelectedReminderDate] = useState(new Date());
+  const [reminderNoteId, setReminderNoteId] = useState(null);
+  
   const [isBackingUp, setIsBackingUp] = useState(false);
+
+  // طلب إذن الإشعارات عند بدء التطبيق
+  useEffect(() => { 
+    loadData(); 
+    loadDarkMode(); 
+    requestNotificationPermissions();
+  }, []);
+
+  // ==================== دوال التذكيرات ====================
+
+  // طلب إذن الإشعارات
+  const requestNotificationPermissions = async () => {
+    const { status } = await Notifications.requestPermissionsAsync();
+    if (status !== 'granted') {
+      console.log('لم يتم منح إذن الإشعارات');
+    }
+  };
+
+  // إضافة تذكير
+  const addReminder = async (noteId) => {
+    const hasPermission = await requestNotificationPermissions();
+    if (!hasPermission) return;
+    
+    setReminderNoteId(noteId);
+    setShowDatePicker(true);
+  };
+
+  // اختيار التاريخ
+  const onDateChange = (event, selectedDate) => {
+    setShowDatePicker(false);
+    if (selectedDate) {
+      setSelectedReminderDate(selectedDate);
+      setShowTimePicker(true);
+    }
+  };
+
+  // اختيار الوقت وحفظ التذكير
+  const onTimeChange = async (event, selectedTime) => {
+    setShowTimePicker(false);
+    if (selectedTime) {
+      const reminderDateTime = new Date(selectedReminderDate);
+      reminderDateTime.setHours(selectedTime.getHours(), selectedTime.getMinutes());
+      
+      if (reminderDateTime <= new Date()) {
+        Alert.alert('تنبيه', 'الرجاء اختيار وقت في المستقبل');
+        return;
+      }
+      
+      // تحديث الملاحظة بإضافة التذكير
+      const updatedFolders = folders.map(folder => 
+        folder.id === selectedFolder.id ? {
+          ...folder,
+          notes: folder.notes.map(note => 
+            note.id === reminderNoteId ? { ...note, reminder: reminderDateTime.toISOString() } : note
+          )
+        } : folder
+      );
+      
+      setFolders(updatedFolders);
+      saveFolders(updatedFolders);
+      
+      // تحديث المجلد المفتوح
+      const updatedFolder = updatedFolders.find(f => f.id === selectedFolder.id);
+      setSelectedFolder(updatedFolder);
+      setNotes(updatedFolder.notes);
+      
+      // جدولة الإشعار
+      const note = updatedFolder.notes.find(n => n.id === reminderNoteId);
+      if (note) {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: '📝 تذكير من تطبيق ملاحظات',
+            body: note.title,
+            sound: true,
+            data: { noteId: reminderNoteId },
+          },
+          trigger: { date: reminderDateTime },
+        });
+      }
+      
+      Alert.alert('تم', 'تم تعيين التذكير بنجاح');
+    }
+    setReminderNoteId(null);
+  };
+
+  // حذف التذكير
+  const removeReminder = async (noteId) => {
+    const updatedFolders = folders.map(folder => 
+      folder.id === selectedFolder.id ? {
+        ...folder,
+        notes: folder.notes.map(note => 
+          note.id === noteId ? { ...note, reminder: null } : note
+        )
+      } : folder
+    );
+    
+    setFolders(updatedFolders);
+    saveFolders(updatedFolders);
+    
+    const updatedFolder = updatedFolders.find(f => f.id === selectedFolder.id);
+    setSelectedFolder(updatedFolder);
+    setNotes(updatedFolder.notes);
+    
+    await Notifications.cancelAllScheduledNotificationsAsync();
+    Alert.alert('تم', 'تم إلغاء التذكير');
+  };
 
   // ==================== مسار النسخة الاحتياطية المؤقتة ====================
   const getTempBackupPath = () => {
@@ -221,11 +344,6 @@ export default function App() {
   }, [selectedFolder, noteViewVisible, editModalVisible, showTrash, showStats, lockModalVisible, folderModalVisible]);
 
   // تحميل البيانات عند بدء التطبيق
-  useEffect(() => { 
-    loadData(); 
-    loadDarkMode(); 
-  }, []);
-
   const loadData = async () => {
     try {
       const savedFolders = await AsyncStorage.getItem('@smart_folders_v15');
@@ -275,7 +393,7 @@ export default function App() {
     setCurrentNote({
       id: null, title: '', content: '', color: selectedFolder?.color || COLORS[0],
       tags: [], checklist: [], links: [], isLocked: false, lockPassword: '',
-      isPinned: false, isFavorite: false
+      isPinned: false, isFavorite: false, reminder: null
     });
     setChecklistItem('');
     setLinkInput('');
@@ -420,6 +538,9 @@ export default function App() {
         shareText += `\n🔗 روابط:\n`;
         note.links.forEach(l => shareText += `• ${l.name}: ${l.url}\n`);
       }
+      if (note.reminder) {
+        shareText += `\n⏰ تذكير: ${new Date(note.reminder).toLocaleString('ar-SA')}\n`;
+      }
       await Share.share({ message: shareText, title: note.title });
     } catch (error) {}
   };
@@ -455,7 +576,7 @@ export default function App() {
   };
 
   const getStats = () => {
-    let totalNotes = 0, totalWords = 0, totalChecklists = 0, totalLinks = 0;
+    let totalNotes = 0, totalWords = 0, totalChecklists = 0, totalLinks = 0, totalReminders = 0;
     let pinnedCount = 0, favoriteCount = 0;
     folders.forEach(f => {
       totalNotes += f.notes.length;
@@ -463,11 +584,12 @@ export default function App() {
         totalWords += (n.content || '').split(' ').length; 
         totalChecklists += n.checklist?.length || 0;
         totalLinks += n.links?.length || 0;
+        if (n.reminder) totalReminders++;
         if (n.isPinned) pinnedCount++;
         if (n.isFavorite) favoriteCount++;
       });
     });
-    return { totalNotes, totalFolders: folders.length, totalWords, totalChecklists, totalLinks, totalTrash: trash.length, pinnedCount, favoriteCount };
+    return { totalNotes, totalFolders: folders.length, totalWords, totalChecklists, totalLinks, totalReminders, totalTrash: trash.length, pinnedCount, favoriteCount };
   };
   const stats = getStats();
 
@@ -508,6 +630,7 @@ export default function App() {
           {item.isPinned && <Text style={{ fontSize: 14, marginLeft: 5 }}>📌</Text>}
           {item.isFavorite && <Text style={{ fontSize: 14, marginLeft: 5 }}>⭐</Text>}
           {item.isLocked && <Text style={{ fontSize: 14, marginLeft: 5 }}>🔒</Text>}
+          {item.reminder && <Text style={{ fontSize: 14, marginLeft: 5 }}>⏰</Text>}
         </View>
       </View>
       <Text style={[styles.noteTitle, { color: item.color?.text || colors.text }]}>{item.title}</Text>
@@ -559,6 +682,14 @@ export default function App() {
             </TouchableOpacity>
             <Text style={[styles.fullScreenTitle, { color: viewOnlyNote?.color?.text || colors.text }]}>{viewOnlyNote?.title}</Text>
             <View style={styles.fullScreenActions}>
+              <TouchableOpacity onPress={() => addReminder(viewOnlyNote?.id)} style={styles.actionIcon}>
+                <Text style={{ fontSize: 22, color: viewOnlyNote?.reminder ? colors.success : colors.text }}>⏰</Text>
+              </TouchableOpacity>
+              {viewOnlyNote?.reminder && (
+                <TouchableOpacity onPress={() => removeReminder(viewOnlyNote?.id)} style={styles.actionIcon}>
+                  <Text style={{ fontSize: 22, color: colors.danger }}>🚫</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity onPress={() => togglePinNote(viewOnlyNote?.id, true)} style={styles.actionIcon}>
                 <Text style={{ fontSize: 22, color: viewOnlyNote?.isPinned ? colors.warning : colors.text }}>📌</Text>
               </TouchableOpacity>
@@ -594,6 +725,11 @@ export default function App() {
                     <Text style={[styles.linkUrl, { color: (viewOnlyNote?.color?.text || colors.text) + '99' }]} numberOfLines={1}>{link.url}</Text>
                   </View>
                 ))}
+              </View>
+            )}
+            {viewOnlyNote?.reminder && (
+              <View style={[styles.reminderInfo, { backgroundColor: 'rgba(108,99,255,0.1)', marginTop: 10, marginBottom: 20, padding: 15, borderRadius: 15, alignItems: 'center' }]}>
+                <Text style={{ fontSize: 14, color: colors.primary }}>⏰ تذكير: {new Date(viewOnlyNote.reminder).toLocaleString('ar-SA')}</Text>
               </View>
             )}
             <Text style={[styles.fullScreenDate, { color: (viewOnlyNote?.color?.text || colors.text) + '99' }]}>
@@ -637,6 +773,7 @@ export default function App() {
           <View style={styles.statsRow}>
             <View style={styles.statItem}><Text style={[styles.statNumber, { color: '#f59e0b' }]}>{stats.pinnedCount}</Text><Text>مثبتة</Text></View>
             <View style={styles.statItem}><Text style={[styles.statNumber, { color: '#10b981' }]}>{stats.favoriteCount}</Text><Text>مفضلة</Text></View>
+            <View style={styles.statItem}><Text style={[styles.statNumber, { color: colors.success }]}>{stats.totalReminders}</Text><Text>تذكيرات</Text></View>
           </View>
         </View>
       )}
@@ -768,6 +905,24 @@ export default function App() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+      
+      {/* منتقي التاريخ والوقت للتذكير */}
+      {showDatePicker && (
+        <DateTimePicker
+          value={selectedReminderDate}
+          mode="date"
+          display="default"
+          onChange={onDateChange}
+        />
+      )}
+      {showTimePicker && (
+        <DateTimePicker
+          value={selectedReminderDate}
+          mode="time"
+          display="default"
+          onChange={onTimeChange}
+        />
+      )}
     </View>
   );
 }
@@ -811,6 +966,7 @@ const styles = StyleSheet.create({
   fabText: { fontSize: 32, color: '#fff', fontWeight: 'bold' },
   backupBtn: { paddingHorizontal: 15, paddingVertical: 12, borderRadius: 25 },
   backupBtnText: { color: '#fff', fontWeight: 'bold' },
+  reminderInfo: { marginTop: 10, marginBottom: 20, padding: 15, borderRadius: 15, alignItems: 'center' },
   
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 20 },
   modalContentSmall: { borderRadius: 20, padding: 20 },
